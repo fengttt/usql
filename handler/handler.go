@@ -1125,11 +1125,21 @@ func (h *Handler) doExecSingle(ctx context.Context, w io.Writer, opt metacmd.Opt
 	if qtyp {
 		f = h.doQuery
 	}
+
 	// exec
 	start := time.Now()
-	if err := f(ctx, w, opt, prefix, sqlstr, bind); err != nil {
-		return err
+
+	// mo hijack
+	if moShouldHijack(sqlstr) {
+		if err := moHijack(h, ctx, w, opt, prefix, sqlstr, qtyp, bind); err != nil {
+			return err
+		}
+	} else {
+		if err := f(ctx, w, opt, prefix, sqlstr, bind); err != nil {
+			return err
+		}
 	}
+
 	if h.timing {
 		d := time.Since(start)
 		s := text.TimingDesc
