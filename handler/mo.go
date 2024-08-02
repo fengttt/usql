@@ -3,11 +3,14 @@ package handler
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/ollama"
 	"github.com/xo/resvg"
 	"github.com/xo/usql/env"
 	"github.com/xo/usql/metacmd"
@@ -38,6 +41,16 @@ func splitQstr(qstr string) (string, string, string) {
 				wbuf = &gnuplotBuf
 			} else if strings.HasPrefix(line, text2sqlHint) {
 				wbuf = &text2sqlBuf
+				idx := strings.IndexAny(line, " \t")
+				if idx > 0 {
+					rest := strings.TrimSpace(line[idx:])
+					if rest != "" {
+						qline := lookupQueryDesc(rest)
+						wbuf.WriteString(qline)
+						wbuf.WriteString("\n")
+						line = ""
+					}
+				}
 			} else if !strings.HasPrefix(line, "--") || strings.HasPrefix(line, sqlHint) {
 				wbuf = &sqlBuf
 			}
@@ -62,36 +75,38 @@ func splitQstr(qstr string) (string, string, string) {
 }
 
 func moHijack(h *Handler, ctx context.Context, w io.Writer, opt metacmd.Option, prefix, qstr string, qtyp bool, bind []any) error {
+	var err error
 	stdout := h.IO().Stdout()
-
 	gnuplotStr, text2sqlStr, sqlStr := splitQstr(qstr)
 
-	// NYI.  Just do a debug print for now.
-	fmt.Fprintln(stdout, "=== MO HIJACK ===")
-	fmt.Fprintln(stdout, "opt:", opt)
-	fmt.Fprintln(stdout, "prefix:", prefix)
-	fmt.Fprintln(stdout, "qstr:", qstr)
-	fmt.Fprintln(stdout, "qtyp:", qtyp)
-	fmt.Fprintln(stdout, "bind:", bind)
-	fmt.Fprintln(stdout, "------")
-	fmt.Fprintln(stdout, "gnuplotStr:", gnuplotStr)
-	fmt.Fprintln(stdout, "text2sqlStr:", text2sqlStr)
-	fmt.Fprintln(stdout, "sqlStr:", sqlStr)
-	fmt.Fprintln(stdout, "=== MO HIJACK ===")
+	// trim spaces
+	sqlStr = strings.TrimSpace(sqlStr)
 
 	// if we have text2sqlStr and not having sqlStr, ask LLM to help.
-	if text2sqlStr != "" && sqlStr != "" {
-		// NYI.
-	}
+	fmt.Fprintln(stdout, "========= MO HIJACK =========")
+	fmt.Fprintln(stdout, "gnuplotStr: ", gnuplotStr)
+	fmt.Fprintln(stdout, "text2sqlStr: ", text2sqlStr)
+	fmt.Fprintln(stdout, "sqlStr: ", sqlStr)
+	fmt.Fprintln(stdout, "========= MO HIJACK =========")
 
-	// no sql, nothing to do.
-	if sqlStr == "" {
-		return nil
+	if text2sqlStr != "" && sqlStr == ";" {
+		var tmpSqlStr string
+		if tmpSqlStr, err = text2sql(h, ctx, text2sqlStr); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "========= Prompting LLM =========")
+		fmt.Fprintln(h.IO().Stdout(), tmpSqlStr)
+		fmt.Fprintln(stdout, "========= Prompting LLM =========")
+		sqlStr = tmpSqlStr + ";"
 	}
 
 	if gnuplotStr == "" {
-		return h.doExecSingle(ctx, w, opt, prefix, sqlStr, qtyp, bind)
+		fmt.Fprintln(stdout, "========= Executing SQL =========")
+		fmt.Fprintln(stdout, "prefix: ", prefix)
+		fmt.Fprintln(stdout, "sqlStr: ", sqlStr)
+		return h.doExecSingle(ctx, w, opt, prefix, sqlStr, true, bind)
 	} else {
+		fmt.Fprintln(stdout, "========= Executing gnuplotStr =========")
 		return createGnuplotFile(h, ctx, sqlStr, gnuplotStr, bind)
 	}
 }
@@ -100,6 +115,11 @@ func createGnuplotFile(h *Handler, ctx context.Context, sqlStr, gnuplotStr strin
 	tmpDir, ok := os.LookupEnv("MO_TMPDIR")
 	if !ok {
 		tmpDir = "/tmp"
+	}
+
+	gnuplotCmd, ok := os.LookupEnv("MO_GNUPLOT")
+	if !ok {
+		gnuplotCmd = "/opt/homebrew/bin/gnuplot"
 	}
 
 	plotFn := fmt.Sprintf("%s/mo_usql_gnuplot.plot", tmpDir)
@@ -154,9 +174,10 @@ func createGnuplotFile(h *Handler, ctx context.Context, sqlStr, gnuplotStr strin
 	// but overwrite output file name is almost always a bad idea.
 	plotFile.WriteString("set term svg size 800,600\n")
 	plotFile.WriteString("set output '" + svgFn + "'\n")
+	plotFile.WriteString("set boxwidth 0.5\n")
 	plotFile.WriteString(gnuplotStr)
 
-	cmd := exec.Command("gnuplot", plotFn)
+	cmd := exec.Command(gnuplotCmd, plotFn)
 	_, err = cmd.Output()
 	if err != nil {
 		return err
@@ -165,7 +186,8 @@ func createGnuplotFile(h *Handler, ctx context.Context, sqlStr, gnuplotStr strin
 	if err != nil {
 		return err
 	}
-	img, err := resvg.Render(svg)
+	// bg white: gnuplot is usually tuned with white background.
+	img, err := resvg.Render(svg, resvg.WithBackground(color.White))
 	if err != nil {
 		return err
 	}
@@ -176,4 +198,154 @@ func createGnuplotFile(h *Handler, ctx context.Context, sqlStr, gnuplotStr strin
 	}
 
 	return typ.Encode(h.IO().Stdout(), img)
+}
+
+func queryOneStringValue(h *Handler, ctx context.Context, skip1 bool, query string) (string, error) {
+	var err error
+	rows, err := h.DB().QueryContext(ctx, query)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var val string
+		if skip1 {
+			var tmp string
+			err = rows.Scan(&tmp, &val)
+		} else {
+			err = rows.Scan(&val)
+		}
+		if err != nil {
+			return "", err
+		}
+		return val, nil
+	}
+	return "", nil
+}
+
+func queryManyStringValue(h *Handler, ctx context.Context, query string) ([]string, error) {
+	ret := []string{}
+	rows, err := h.DB().QueryContext(ctx, query)
+	if err != nil {
+		return ret, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var val string
+		err := rows.Scan(&val)
+		if err != nil {
+			return ret, err
+		}
+		ret = append(ret, val)
+	}
+	return ret, nil
+}
+
+// The art of computer programming is to ask LLM "nicely".
+// The following prompt is from sqlcoder.
+const promptHeader string = `
+### Instructions:
+Your task is to convert a question into a SQL query, given a MySQL database schema.
+Adhere to these rules:
+- **Deliberately go through the question and database schema word by word** to appropriately answer the question
+- **Use Table Aliases** to prevent ambiguity. For example,` + " `SELECT table1.col1, table2.col1 FROM table1 JOIN table2 ON table1.id = table2.id`." + `
+- When creating a ratio, always cast the numerator as float
+
+### Input:
+Generate a SQL query that answers the question ` + "`%s`." + `
+This query will run on a database whose schema is represented in this string:
+`
+
+const promptFooter string = `
+### Response:
+Based on your instructions, here is the SQL query I have generated to answer the question ` + "`%s`:\n```sql\n"
+
+// global variables, yeah, I know it is bad.
+var moDbName string
+var moTableSchemaStr string
+
+func text2sql(h *Handler, ctx context.Context, text2sqlStr string) (string, error) {
+	var err error
+	if moDbName == "" {
+		moDbName, err = queryOneStringValue(h, ctx, false, "select database()")
+		if err != nil {
+			return "", err
+		}
+
+		tables, err := queryManyStringValue(h, ctx, "show tables")
+		if err != nil {
+			return "", err
+		}
+
+		buf := strings.Builder{}
+		for _, table := range tables {
+			schema, err := queryOneStringValue(h, ctx, true, fmt.Sprintf("show create table %s", table))
+			if err != nil {
+				return "", err
+			}
+			buf.WriteString(schema)
+			buf.WriteString("\n")
+		}
+		moTableSchemaStr = buf.String()
+	}
+
+	buf := strings.Builder{}
+	buf.WriteString(fmt.Sprintf(promptHeader, text2sqlStr))
+	buf.WriteString(moTableSchemaStr)
+	buf.WriteString(fmt.Sprintf(promptFooter, text2sqlStr))
+
+	model, ok := os.LookupEnv("MO_LLM_MODEL")
+	if !ok {
+		model = "llama3.1"
+	}
+
+	// prompt llm
+	llm, err := ollama.New(ollama.WithModel(model))
+	if err != nil {
+		return "", err
+	}
+	prompt := []llms.MessageContent{
+		llms.TextParts(llms.ChatMessageTypeSystem, "You are a SQL/Database expert that helps user to convert a question into a SQL query."),
+		llms.TextParts(llms.ChatMessageTypeHuman, buf.String()),
+	}
+	completion, err := llm.GenerateContent(ctx, prompt, llms.WithTemperature(0.1))
+	if err != nil {
+		return "", err
+	}
+	if len(completion.Choices) == 0 {
+		return "", fmt.Errorf("no completion")
+	}
+
+	lines := strings.Split(completion.Choices[0].Content, "\n")
+	sqlBuf := &strings.Builder{}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "```sql") {
+			sqlBuf.Reset()
+			continue
+		} else if strings.HasPrefix(line, "```") {
+			// done
+			break
+		}
+		sqlBuf.WriteString(line)
+		sqlBuf.WriteString("\n")
+	}
+
+	return sqlBuf.String(), nil
+}
+
+func lookupQueryDesc(q string) string {
+	switch q {
+	case "tpch-q1":
+		return `
+List return flag, line status, 
+totals of extended price, discounted extended price,
+discounted extended price plus tax, average quantity, 
+average extended price and average discount for all orders 
+whose ship date is between 90 days before 1998-12-01 and 
+1998-12-01.  Group result by return flag and line status,
+sorted by return flag and line status in ascending order. 
+`
+	default:
+		return ""
+	}
 }
