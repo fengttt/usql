@@ -24,6 +24,14 @@ func moShouldHijack(qstr string) bool {
 	return strings.HasPrefix(qstr, gnuplotHint) || strings.HasPrefix(qstr, text2sqlHint)
 }
 
+func envGetDefault(key, def string) string {
+	val := env.Get(key)
+	if val == "" {
+		return def
+	}
+	return val
+}
+
 func splitQstr(qstr string) (string, string, string) {
 	gnuplotBuf := strings.Builder{}
 	text2sqlBuf := strings.Builder{}
@@ -112,15 +120,8 @@ func moHijack(h *Handler, ctx context.Context, w io.Writer, opt metacmd.Option, 
 }
 
 func createGnuplotFile(h *Handler, ctx context.Context, sqlStr, gnuplotStr string, bind []any) error {
-	tmpDir, ok := os.LookupEnv("MO_TMPDIR")
-	if !ok {
-		tmpDir = "/tmp"
-	}
-
-	gnuplotCmd, ok := os.LookupEnv("MO_GNUPLOT")
-	if !ok {
-		gnuplotCmd = "/opt/homebrew/bin/gnuplot"
-	}
+	tmpDir := envGetDefault("MO_TMPDIR", "/tmp")
+	gnuplotCmd := envGetDefault("MO_GNUPLOT", "/opt/homebrew/bin/gnuplot")
 
 	plotFn := fmt.Sprintf("%s/mo_usql_gnuplot.plot", tmpDir)
 	svgFn := fmt.Sprintf("%s/mo_usql_gnuplot.svg", tmpDir)
@@ -294,10 +295,7 @@ func text2sql(h *Handler, ctx context.Context, text2sqlStr string) (string, erro
 	buf.WriteString(moTableSchemaStr)
 	buf.WriteString(fmt.Sprintf(promptFooter, text2sqlStr))
 
-	model, ok := os.LookupEnv("MO_LLM_MODEL")
-	if !ok {
-		model = "llama3.1"
-	}
+	model := envGetDefault("MO_LLM_MODEL", "llama3.1")
 
 	// prompt llm
 	llm, err := ollama.New(ollama.WithModel(model))
@@ -344,6 +342,45 @@ average extended price and average discount for all orders
 whose ship date is between 90 days before 1998-12-01 and 
 1998-12-01.  Group result by return flag and line status,
 sorted by return flag and line status in ascending order. 
+`
+	case "tpch-q2":
+		return `
+Find in the region "MIDDLE EAST", for each part whose type ends 
+with "TIN" and size is 48, the supplier who can supply it 
+at minimum cost.  If several suppliers in that region offer 
+the desired part type and size at the same minimum cost, the 
+query lists the parts from suppliers with the 100 highest 
+account balances.  For each supplier, the query lists the 
+supplier's account balance, name and nation; the part's 
+number and manufacturer; the supplier's address, phone number 
+and comment information.
+`
+	case "tpch-q3":
+		return `
+Retrieve the shipping priority and potential revenue of 
+orders having the largest revenue among those that had
+been ordered before '1995-03-29' and had not been shipped
+as of '1995-03-29'.  Potential revenue is defined as the
+sum of the l_extendedprice * (1 - l_discount).   If more 
+than 10 unshipped orders exist, only the 10 orders with the
+largest potential revenue are listed.  
+`
+	case "tpch-q4":
+		return `
+Count the number of orders in the third quatrer of 1997 
+that at least one lineitem was received by the customer
+later than its committed date.  The query lists the the 
+count of such orders for each order priority sorted in 
+ascending priority order
+`
+	case "tpch-q5":
+		return `
+For each nation is region "AMERICA", list the revenue volume
+of year 1997, that resulted from lineitem transactions in which 
+the customer ordering parts and supplier filling them were both 
+with that nation.  The revenue volume is defined as sum of
+l_extendedprice * (1 - l_discouint).  The query diesplays the 
+nations, the revenue volume in decending order by revenue volume.
 `
 	default:
 		return ""
