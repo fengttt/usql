@@ -55,7 +55,7 @@ func splitQstr(qstr string) (string, string, string, map[string]string) {
 				if len(strs) > 1 {
 					for _, str := range strs[1:] {
 						kv := strings.Split(str, "=")
-						fmt.Println("gnuplotHint: split line get kv", kv)
+						// fmt.Println("gnuplotHint: split line get kv", kv)
 						if len(kv) == 2 {
 							options[kv[0]] = kv[1]
 						}
@@ -106,11 +106,11 @@ func moHijack(h *Handler, ctx context.Context, w io.Writer, opt metacmd.Option, 
 	sqlStr = strings.TrimSpace(sqlStr)
 
 	// if we have text2sqlStr and not having sqlStr, ask LLM to help.
-	// fmt.Fprintln(stdout, "========= MO HIJACK =========")
-	// fmt.Fprintln(stdout, "gnuplotStr: ", gnuplotStr)
-	// fmt.Fprintln(stdout, "text2sqlStr: ", text2sqlStr)
-	// fmt.Fprintln(stdout, "sqlStr: ", sqlStr)
-	// fmt.Fprintln(stdout, "========= MO HIJACK =========")
+	fmt.Fprintln(stdout, "========= MO HIJACK =========")
+	fmt.Fprintln(stdout, "gnuplotStr: ", gnuplotStr)
+	fmt.Fprintln(stdout, "text2sqlStr: ", text2sqlStr)
+	fmt.Fprintln(stdout, "sqlStr: ", sqlStr)
+	fmt.Fprintln(stdout, "========= MO HIJACK =========")
 
 	if text2sqlStr != "" && sqlStr == ";" {
 		var tmpSqlStr string
