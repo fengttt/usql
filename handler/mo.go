@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/tmc/langchaingo/llms"
@@ -32,10 +33,11 @@ func envGetDefault(key, def string) string {
 	return val
 }
 
-func splitQstr(qstr string) (string, string, string) {
+func splitQstr(qstr string) (string, string, string, map[string]string) {
 	gnuplotBuf := strings.Builder{}
 	text2sqlBuf := strings.Builder{}
 	sqlBuf := strings.Builder{}
+	options := make(map[string]string)
 
 	// write buffer, initially nil
 	var wbuf *strings.Builder
@@ -47,6 +49,19 @@ func splitQstr(qstr string) (string, string, string) {
 			// mode switch
 			if strings.HasPrefix(line, gnuplotHint) {
 				wbuf = &gnuplotBuf
+				// fmt.Println("gnuplotHint: line ", line)
+				strs := strings.Split(line, " ")
+				// fmt.Println("gnuplotHint: split line ", strs)
+				if len(strs) > 1 {
+					for _, str := range strs[1:] {
+						kv := strings.Split(str, "=")
+						fmt.Println("gnuplotHint: split line get kv", kv)
+						if len(kv) == 2 {
+							options[kv[0]] = kv[1]
+						}
+					}
+				}
+				line = ""
 			} else if strings.HasPrefix(line, text2sqlHint) {
 				wbuf = &text2sqlBuf
 				idx := strings.IndexAny(line, " \t")
@@ -79,23 +94,23 @@ func splitQstr(qstr string) (string, string, string) {
 			wbuf.WriteString("\n")
 		}
 	}
-	return gnuplotBuf.String(), text2sqlBuf.String(), sqlBuf.String()
+	return gnuplotBuf.String(), text2sqlBuf.String(), sqlBuf.String(), options
 }
 
 func moHijack(h *Handler, ctx context.Context, w io.Writer, opt metacmd.Option, prefix, qstr string, qtyp bool, bind []any) error {
 	var err error
 	stdout := h.IO().Stdout()
-	gnuplotStr, text2sqlStr, sqlStr := splitQstr(qstr)
+	gnuplotStr, text2sqlStr, sqlStr, opts := splitQstr(qstr)
 
 	// trim spaces
 	sqlStr = strings.TrimSpace(sqlStr)
 
 	// if we have text2sqlStr and not having sqlStr, ask LLM to help.
-	fmt.Fprintln(stdout, "========= MO HIJACK =========")
-	fmt.Fprintln(stdout, "gnuplotStr: ", gnuplotStr)
-	fmt.Fprintln(stdout, "text2sqlStr: ", text2sqlStr)
-	fmt.Fprintln(stdout, "sqlStr: ", sqlStr)
-	fmt.Fprintln(stdout, "========= MO HIJACK =========")
+	// fmt.Fprintln(stdout, "========= MO HIJACK =========")
+	// fmt.Fprintln(stdout, "gnuplotStr: ", gnuplotStr)
+	// fmt.Fprintln(stdout, "text2sqlStr: ", text2sqlStr)
+	// fmt.Fprintln(stdout, "sqlStr: ", sqlStr)
+	// fmt.Fprintln(stdout, "========= MO HIJACK =========")
 
 	if text2sqlStr != "" && sqlStr == ";" {
 		var tmpSqlStr string
@@ -109,17 +124,17 @@ func moHijack(h *Handler, ctx context.Context, w io.Writer, opt metacmd.Option, 
 	}
 
 	if gnuplotStr == "" {
-		fmt.Fprintln(stdout, "========= Executing SQL =========")
-		fmt.Fprintln(stdout, "prefix: ", prefix)
-		fmt.Fprintln(stdout, "sqlStr: ", sqlStr)
+		// fmt.Fprintln(stdout, "========= Executing SQL =========")
+		// fmt.Fprintln(stdout, "prefix: ", prefix)
+		// fmt.Fprintln(stdout, "sqlStr: ", sqlStr)
 		return h.doExecSingle(ctx, w, opt, prefix, sqlStr, true, bind)
 	} else {
-		fmt.Fprintln(stdout, "========= Executing gnuplotStr =========")
-		return createGnuplotFile(h, ctx, sqlStr, gnuplotStr, bind)
+		// fmt.Fprintln(stdout, "========= Executing gnuplotStr =========")
+		return createGnuplotFile(h, ctx, sqlStr, gnuplotStr, bind, opts)
 	}
 }
 
-func createGnuplotFile(h *Handler, ctx context.Context, sqlStr, gnuplotStr string, bind []any) error {
+func createGnuplotFile(h *Handler, ctx context.Context, sqlStr, gnuplotStr string, bind []any, opts map[string]string) error {
 	tmpDir := envGetDefault("MO_TMPDIR", "/tmp")
 	gnuplotCmd := envGetDefault("MO_GNUPLOT", "/opt/homebrew/bin/gnuplot")
 
@@ -146,11 +161,35 @@ func createGnuplotFile(h *Handler, ctx context.Context, sqlStr, gnuplotStr strin
 	}
 	ncol := len(cols)
 	tfmt := env.GoTime()
+	indexcolpos, ok := opts["index"]
+	indexcol := -1
+	var indexbuffers map[string]*strings.Builder
+	if ok {
+		indexcol, err = strconv.Atoi(indexcolpos)
+		if err != nil {
+			return err
+		}
+		if indexcol >= ncol {
+			return fmt.Errorf("index column out of range")
+		}
+		indexbuffers = make(map[string]*strings.Builder)
+	}
+
 	for rows.Next() {
 		row, err := h.scan(rows, ncol, tfmt)
 		if err != nil {
 			return err
 		}
+
+		var sb *strings.Builder
+		if indexcol >= 0 {
+			index := row[indexcol]
+			if _, ok := indexbuffers[index]; !ok {
+				indexbuffers[index] = &strings.Builder{}
+			}
+			sb = indexbuffers[index]
+		}
+
 		for i, v := range row {
 			// replace newlines with __
 			vv := strings.ReplaceAll(v, "\r\n", "__")
@@ -161,12 +200,31 @@ func createGnuplotFile(h *Handler, ctx context.Context, sqlStr, gnuplotStr strin
 			vv = strings.ReplaceAll(vv, "\t", "_")
 			vv = strings.ReplaceAll(vv, " ", "_")
 
-			plotFile.WriteString(vv)
-			if i < ncol-1 {
-				plotFile.WriteString(" ")
+			if indexcol < 0 {
+				plotFile.WriteString(vv)
+				if i < ncol-1 {
+					plotFile.WriteString(" ")
+				} else {
+					plotFile.WriteString("\n")
+				}
 			} else {
-				plotFile.WriteString("\n")
+				sb.WriteString(vv)
+				if i < ncol-1 {
+					sb.WriteString(" ")
+				} else {
+					sb.WriteString("\n")
+				}
 			}
+		}
+	}
+	if indexcol >= 0 {
+		sep := ""
+		for k, sb := range indexbuffers {
+			plotFile.WriteString(sep)
+			plotFile.WriteString(fmt.Sprintf("# %s\n", k))
+			plotFile.WriteString(sb.String())
+			// gnuplot data index separator is 2 newlines.
+			sep = "\n\n"
 		}
 	}
 	plotFile.WriteString("EOD\n")
